@@ -1,0 +1,34 @@
+[project]
+name = "lcm-tools"
+version = "0.1.0"
+description = "ROS2-like command line tools for LCM (Lightweight Communications and Marshalling)"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [
+    { name = "lcm-tools contributors" },
+]
+dependencies = [
+    "typer>=0.12.0",
+    "rich>=13.0.0",
+]
+
+[project.optional-dependencies]
+decode = ["lcm>=1.5.0"]
+dev = [
+    "pytest>=7.0",
+    "pytest-timeout>=2.1",
+]
+
+[project.scripts]
+lcm = "lcm_tools.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lcm_tools"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
