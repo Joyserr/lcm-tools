@@ -71,19 +71,99 @@ def echo_packet_raw(pkt: PacketInfo, msg_index: int) -> None:
     )
 
 
+def _format_value(value: Any, indent: int = 1) -> str:
+    """Recursively format a field value, expanding nested LCM structs.
+
+    Args:
+        value: The field value to format.
+        indent: Current indentation level (each level = 2 spaces).
+
+    Returns:
+        A formatted string representation of the value.
+    """
+    prefix = "  " * indent
+
+    # Handle nested LCM struct objects (have __slots__ or custom attributes)
+    if hasattr(value, "__slots__") or (
+        hasattr(value, "__dict__")
+        and not isinstance(value, (list, tuple, dict, str, bytes))
+        and not hasattr(value, "__len__")
+    ):
+        nested_fields = _extract_fields(value)
+        if nested_fields:
+            lines = []
+            for k, v in nested_fields:
+                formatted_v = _format_value(v, indent + 1)
+                lines.append(f"{prefix}  {k}: {formatted_v}")
+            return "\n" + "\n".join(lines)
+
+    # Handle lists / tuples (e.g., arrays of structs or primitives)
+    if isinstance(value, (list, tuple)):
+        if not value:
+            return "[]"
+        # Check if elements are nested structs
+        first = value[0]
+        if hasattr(first, "__slots__") or (
+            hasattr(first, "__dict__")
+            and not isinstance(first, (list, tuple, dict, str, bytes))
+            and not hasattr(first, "__len__")
+        ):
+            lines = []
+            for i, item in enumerate(value):
+                nested_fields = _extract_fields(item)
+                if nested_fields:
+                    lines.append(f"{prefix}  [{i}]:")
+                    for k, v in nested_fields:
+                        formatted_v = _format_value(v, indent + 2)
+                        lines.append(f"{prefix}    {k}: {formatted_v}")
+                else:
+                    lines.append(f"{prefix}  [{i}]: {item}")
+            return "\n" + "\n".join(lines)
+        return repr(value)
+
+    # Handle dicts
+    if isinstance(value, dict):
+        if not value:
+            return "{}"
+        lines = []
+        for k, v in value.items():
+            formatted_v = _format_value(v, indent + 1)
+            lines.append(f"{prefix}  {k}: {formatted_v}")
+        return "\n" + "\n".join(lines)
+
+    # Primitive types
+    return repr(value)
+
+
+def _extract_fields(obj: Any) -> list[tuple[str, Any]]:
+    """Extract (name, value) pairs from an LCM struct-like object."""
+    # Prefer __slots__ if available (lcm-gen generated classes use __slots__)
+    if hasattr(obj, "__slots__"):
+        return [
+            (k, getattr(obj, k))
+            for k in obj.__slots__
+            if not k.startswith("_")
+        ]
+    # Fall back to dir(), filtering out callables and private attrs
+    return [
+        (k, getattr(obj, k))
+        for k in dir(obj)
+        if not k.startswith("_") and not callable(getattr(obj, k))
+    ]
+
+
 def echo_packet_decoded(
     pkt: PacketInfo, msg_index: int, decode_cls: Any
 ) -> None:
-    """Display a decoded LCM message."""
+    """Display a decoded LCM message with recursive nested struct expansion."""
     ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
     try:
         msg = decode_cls.decode(pkt.payload)
-        fields = {
-            k: getattr(msg, k)
-            for k in dir(msg)
-            if not k.startswith("_") and not callable(getattr(msg, k))
-        }
-        body_lines = [f"  {k}: {v}" for k, v in fields.items()]
+        fields = _extract_fields(msg)
+        body_lines = []
+        for k, v in fields:
+            formatted_v = _format_value(v, indent=1)
+            body_lines.append(f"  {k}: {formatted_v}")
         body = "\n".join(body_lines)
     except Exception as exc:
         body = f"[decode error: {exc}]\nRaw hex: {pkt.payload[:64].hex(' ')}"
