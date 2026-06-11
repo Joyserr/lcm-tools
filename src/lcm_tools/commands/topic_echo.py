@@ -3,10 +3,11 @@
 Listens on the LCM multicast group and prints every message matching
 the given channel name (or pattern).
 
-Supports three display modes:
+Supports four display modes:
 - **default**: Rich panel with hex dump and metadata
 - **--raw**: compact one-line-per-message text
 - **--type module.Class**: decode payload with an lcm-gen generated class
+- **--lcm-file path.lcm**: auto-decode from .lcm file definitions
 """
 
 from __future__ import annotations
@@ -16,12 +17,13 @@ import re
 import signal
 import sys
 import threading
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 import typer
 from rich.console import Console
 
 from lcm_tools.display.echo_display import (
+    echo_packet_auto_decode,
     echo_packet_decoded,
     echo_packet_default,
     echo_packet_raw,
@@ -59,7 +61,15 @@ def echo(
     type_path: Optional[str] = typer.Option(
         None,
         "--type",
-        help="lcm-gen type for decoding, e.g. 'exlcm.example_t'.",
+        help="lcm-gen type for decoding, e.g. 'exlcm.example_t'. "
+        "With --lcm-file, use just the struct name (e.g. 'example_t').",
+    ),
+    lcm_files: Optional[List[str]] = typer.Option(
+        None,
+        "--lcm-file",
+        "-f",
+        help="Path to .lcm file or directory containing .lcm files. "
+        "Can be specified multiple times. Enables auto-decode without lcm-gen.",
     ),
     lcm_url: str = typer.Option(
         DEFAULT_MC_ADDR,
@@ -80,14 +90,43 @@ def echo(
         _console.print(f"[red]Invalid regex pattern:[/red] {exc}")
         raise typer.Exit(code=1)
 
-    # Optionally load a decode class
+    # Build TypeRegistry from --lcm-file if provided
+    type_registry: Any = None
+    if lcm_files:
+        try:
+            from lcm_tools.core.lcm_type_builder import TypeRegistry
+
+            type_registry = TypeRegistry()
+            type_registry.register_paths(lcm_files)
+            n_types = len(type_registry.all_types)
+            _console.print(
+                f"[green]Loaded {n_types} type(s) from "
+                f"{len(lcm_files)} LCM file path(s).[/green]"
+            )
+        except Exception as exc:
+            _console.print(f"[red]Failed to load LCM files:[/red] {exc}")
+            raise typer.Exit(code=1)
+
+    # Resolve decode class
     decode_cls: Any = None
     if type_path:
-        try:
-            decode_cls = load_decode_class(type_path)
-        except Exception as exc:
-            _console.print(f"[red]Failed to load type '{type_path}':[/red] {exc}")
-            raise typer.Exit(code=1)
+        if type_registry is not None:
+            # Look up from registry (--lcm-file + --type)
+            decode_cls = type_registry.find_by_name(type_path)
+            if decode_cls is None:
+                available = ", ".join(sorted(type_registry.all_types.keys()))
+                _console.print(
+                    f"[red]Type '{type_path}' not found in LCM files.[/red]\n"
+                    f"Available: {available}"
+                )
+                raise typer.Exit(code=1)
+        else:
+            # Traditional: import from PYTHONPATH
+            try:
+                decode_cls = load_decode_class(type_path)
+            except Exception as exc:
+                _console.print(f"[red]Failed to load type '{type_path}':[/red] {exc}")
+                raise typer.Exit(code=1)
 
     # Thread-safe queue bridging the listener thread → main display thread
     pkt_queue: "queue.Queue[Optional[PacketInfo]]" = queue.Queue(maxsize=5000)
@@ -134,6 +173,8 @@ def echo(
                 echo_packet_raw(pkt, received)
             elif decode_cls:
                 echo_packet_decoded(pkt, received, decode_cls)
+            elif type_registry is not None:
+                echo_packet_auto_decode(pkt, received, type_registry)
             else:
                 echo_packet_default(pkt, received)
 

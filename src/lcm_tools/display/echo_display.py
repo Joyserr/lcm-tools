@@ -19,6 +19,12 @@ from rich.text import Text
 
 from lcm_tools.protocol import PacketInfo, extract_fingerprint, fingerprint_to_hex
 
+# TYPE_CHECKING import for TypeRegistry (avoid circular imports)
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from lcm_tools.core.lcm_type_builder import TypeRegistry
+
 _console = Console()
 
 
@@ -177,6 +183,31 @@ def echo_packet_decoded(
             expand=False,
         )
     )
+
+
+def echo_packet_auto_decode(
+    pkt: PacketInfo, msg_index: int, registry: "TypeRegistry"
+) -> None:
+    """Auto-decode a packet using fingerprint matching from a TypeRegistry.
+
+    If the fingerprint matches a registered type, decode and display.
+    Otherwise, fall back to default display with a hint.
+    """
+    fp = extract_fingerprint(pkt.payload)
+    decode_cls = None
+    if fp is not None:
+        decode_cls = registry.find_by_fingerprint(fp)
+
+    if decode_cls is not None:
+        echo_packet_decoded(pkt, msg_index, decode_cls)
+    else:
+        # Fall back to default display with fingerprint info
+        echo_packet_default(pkt, msg_index)
+        if fp is not None:
+            _console.print(
+                f"  [dim](no matching type for fingerprint "
+                f"{fingerprint_to_hex(fp)})[/dim]"
+            )
 
 
 def load_decode_class(type_path: str) -> Any:
