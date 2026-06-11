@@ -466,12 +466,29 @@ class TypeRegistry:
     def register_file(self, lcm_path: str | Path) -> None:
         """Parse a .lcm file and register all structs found.
 
+        Also auto-discovers sibling .lcm files in the same directory to
+        resolve cross-file type references (nested struct dependencies).
+
         Args:
             lcm_path: Path to a .lcm file.
         """
-        structs = parse_lcm_file(lcm_path)
+        p = Path(lcm_path)
+        structs = parse_lcm_file(p)
         self._structs.extend(structs)
         self._built = False
+
+        # Auto-discover sibling .lcm files for cross-file type references
+        parent = p.parent
+        if parent.is_dir():
+            registered_files = {s.source_file for s in self._structs}
+            for sibling in sorted(parent.glob("*.lcm")):
+                sibling_str = str(sibling)
+                if sibling_str not in registered_files and sibling != p:
+                    try:
+                        sib_structs = parse_lcm_file(sibling)
+                        self._structs.extend(sib_structs)
+                    except Exception:
+                        pass  # Skip unparseable files silently
 
     def register_dir(self, dir_path: str | Path) -> None:
         """Recursively register all .lcm files in a directory.
