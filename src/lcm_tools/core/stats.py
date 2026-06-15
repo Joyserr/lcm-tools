@@ -21,6 +21,11 @@ from lcm_tools.protocol import PacketInfo
 
 # Default sliding-window capacity (number of samples kept per channel)
 _DEFAULT_WINDOW: int = 2000
+# Default sliding-window duration in seconds. Samples older than this
+# relative to the current time are evicted, so a channel that stops
+# publishing decays to a 0 Hz / 0 KB/s rate instead of freezing at the
+# last measured value.
+_DEFAULT_WINDOW_SECONDS: float = 5.0
 
 
 @dataclass
@@ -30,28 +35,49 @@ class ChannelStats:
     channel: str
     msg_count: int = 0
     total_bytes: int = 0
+    window_seconds: float = _DEFAULT_WINDOW_SECONDS
     _timestamps: deque = field(default_factory=lambda: deque(maxlen=_DEFAULT_WINDOW))
     _sizes: deque = field(default_factory=lambda: deque(maxlen=_DEFAULT_WINDOW))
+
+    def _prune(self, now: float) -> None:
+        """Evict samples older than ``now - window_seconds``.
+
+        Called on every rate computation so a channel that stops
+        publishing naturally decays to a 0 Hz / 0 KB/s rate.
+        """
+        cutoff = now - self.window_seconds
+        ts = self._timestamps
+        while ts and ts[0] < cutoff:
+            ts.popleft()
+            self._sizes.popleft()
+
+    def _rate_window(self) -> tuple[int, float, int]:
+        """Return ``(n, dt, total_bytes)`` over the current window.
+
+        Prunes expired samples first, so a silent channel's window
+        empties out and the rate decays to zero.
+        """
+        self._prune(time.monotonic())
+        n = len(self._timestamps)
+        if n < 2:
+            return n, 0.0, 0
+        dt = self._timestamps[-1] - self._timestamps[0]
+        return n, dt, sum(self._sizes)
 
     @property
     def frequency_hz(self) -> float:
         """Message rate in Hz over the current window."""
-        n = len(self._timestamps)
-        if n < 2:
+        n, dt, _ = self._rate_window()
+        if n < 2 or dt <= 0.0:
             return 0.0
-        dt = self._timestamps[-1] - self._timestamps[0]
-        return (n - 1) / dt if dt > 0.0 else 0.0
+        return (n - 1) / dt
 
     @property
     def bandwidth_kbps(self) -> float:
         """Bandwidth in KB/s over the current window."""
-        n = len(self._timestamps)
-        if n < 2:
-            return 0.0
-        dt = self._timestamps[-1] - self._timestamps[0]
+        _, dt, total = self._rate_window()
         if dt <= 0.0:
             return 0.0
-        total = sum(self._sizes)
         return (total / 1024.0) / dt
 
     @property
@@ -139,17 +165,23 @@ class StatsCollector:
     def snapshot(self) -> "StatsSnapshot":
         """Return an immutable point-in-time snapshot of all stats."""
         with self._lock:
-            channels = [
-                _ChannelSnapshot(
-                    channel=s.channel,
-                    msg_count=s.msg_count,
-                    total_bytes=s.total_bytes,
-                    frequency_hz=s.frequency_hz,
-                    bandwidth_kbps=s.bandwidth_kbps,
-                    avg_msg_size=s.avg_msg_size,
-                )
-                for s in sorted(self._stats.values(), key=lambda x: x.channel)
-            ]
+            now = time.monotonic()
+            channels = []
+            for s in sorted(self._stats.values(), key=lambda x: x.channel):
+                # Force prune to ensure stale samples are cleared
+                s._prune(now)
+                # Only include channels that still have recent data in the window
+                if len(s._timestamps) > 0:
+                    channels.append(
+                        _ChannelSnapshot(
+                            channel=s.channel,
+                            msg_count=s.msg_count,
+                            total_bytes=s.total_bytes,
+                            frequency_hz=s.frequency_hz,
+                            bandwidth_kbps=s.bandwidth_kbps,
+                            avg_msg_size=s.avg_msg_size,
+                        )
+                    )
         return StatsSnapshot(
             channels=channels,
             total_channels=len(channels),
